@@ -24,7 +24,9 @@ var rewire  = require('rewire'),
     fs      = require('fs'),
     et      = require('elementtree'),
     events  = require('cordova-common').events,
+    path    = require('path'),
     xml     = require('cordova-common').xmlHelpers,
+    FileUpdater = require('cordova-common').FileUpdater,
     updateManifestFile              = prepare.__get__('updateManifestFile'),
     applyCoreProperties             = prepare.__get__('applyCoreProperties'),
     applyAccessRules                = prepare.__get__('applyAccessRules'),
@@ -56,6 +58,7 @@ function createMockConfigAndManifestForApplyCoreProperties(startPage, preference
     /* jshint proto: false */
     var config = {
         version: function() { return '1.0.0.0'; },
+        description: function () { return 'CordovaApp'; },
         windows_packageVersion: function() { return winPackageVersion; },
         name: function() { return 'HelloCordova'; },
         packageName: function() { return 'org.apache.cordova.HelloCordova'; },
@@ -123,7 +126,7 @@ describe('Windows 10 project', function() {
         var app = mockConfig.manifest.doc.find('.//Application');
 
         // Workaround to avoid WWAHost.exe bug: https://issues.apache.org/jira/browse/CB-10446
-        var isAppxWebStartupUri = app.attrib.StartPage === 'ms-appx-web:///www/index.html' || 
+        var isAppxWebStartupUri = app.attrib.StartPage === 'ms-appx-web:///www/index.html' ||
             app.attrib.StartPage === 'ms-appx-web://' + mockConfig.config.packageName().toLowerCase() + '/www/index.html';
         expect(isAppxWebStartupUri).toBe(true);
     });
@@ -378,5 +381,164 @@ describe('A Windows 10 project should apply the uap: namespace prefix to certain
         expect(testResults.internetClient).toBe('Capability');
         expect(testResults.documentsLibrary).toBe('uap:Capability');
         expect(testResults.location).toBe('DeviceCapability');
+    });
+});
+
+function createMockConfigAndManifestForDescription(description) {
+    var config = {
+        version: function() { return '1.0.0.0'; },
+        name: function() { return 'HelloCordova'; },
+        description: function () { return description; },
+        packageName: function() { return 'org.apache.cordova.HelloCordova'; },
+        author: function() { return 'Apache'; },
+        startPage: function() { return 'index.html'; },
+        windows_packageVersion: function() { return; },
+        getPreference: function () { return; }
+    };
+
+    var manifest = AppxManifest.get(Win81ManifestPath, /*ignoreCache=*/true);
+    spyOn(fs, 'writeFileSync');
+
+    return { config: config, manifest: manifest };
+}
+
+describe('Package description', function () {
+    it('should be applied to both Properties and VisualElements nodes', function () {
+        var mockConfig = createMockConfigAndManifestForDescription('My custom description');
+        applyCoreProperties(mockConfig.config, mockConfig.manifest, 'fake-path', 'uap:', true);
+
+        var desc = mockConfig.manifest.doc.find('.//Properties/Description');
+        expect(desc.text).toBe('My custom description');
+
+        desc = mockConfig.manifest.doc.find('.//Application/m2:VisualElements');
+        expect(desc.attrib.Description).toBe('My custom description');
+    });
+
+    it('should not be removed from  VisualElements node', function () {
+        var mockConfig = createMockConfigAndManifestForDescription();
+        applyCoreProperties(mockConfig.config, mockConfig.manifest, 'fake-path', 'uap:', true);
+
+        var desc = mockConfig.manifest.doc.find('.//Properties/Description');
+        expect(desc).toBe(null);
+
+        desc = mockConfig.manifest.doc.find('.//Application/m2:VisualElements');
+        expect(desc.attrib.Description).toEqual(prepare.__get__('DEFAULT_DESCRIPTION'));
+    });
+
+    it('should be stripped to 2048 symbols before adding to manifest', function () {
+        var veryLongDescription = (new Array(3*1024)).join('x');
+        var mockConfig = createMockConfigAndManifestForDescription(veryLongDescription);
+
+        expect(function () {
+            applyCoreProperties(mockConfig.config, mockConfig.manifest, 'fake-path', 'uap:', true);
+        }).not.toThrow();
+
+        var desc = mockConfig.manifest.doc.find('.//Properties/Description');
+        expect(desc.text.length).toBe(2048);
+
+        desc = mockConfig.manifest.doc.find('.//Application/m2:VisualElements');
+        expect(desc.attrib.Description.length).toBe(2048);
+    });
+
+    it('should be validated before adding to manifest', function () {
+        var mockConfig = createMockConfigAndManifestForDescription('My description with \t and \n symbols');
+
+        expect(function () {
+            applyCoreProperties(mockConfig.config, mockConfig.manifest, 'fake-path', 'uap:', true);
+        }).not.toThrow();
+
+        var desc = mockConfig.manifest.doc.find('.//Properties/Description');
+        expect(desc).not.toMatch(/\n|\t/);
+
+        desc = mockConfig.manifest.doc.find('.//Application/m2:VisualElements');
+        expect(desc.attrib.Description).not.toMatch(/\n|\t/);
+    });
+});
+
+describe('copyIcons method', function () {
+    var copyImages = prepare.__get__('copyImages');
+    var logFileOp = prepare.__get__('logFileOp');
+
+    var PROJECT = '/some/path';
+
+    function createMockConfig(images) {
+        var result = jasmine.createSpyObj('config', ['getIcons', 'getSplashScreens']);
+        result.getIcons.andReturn(images);
+        result.getSplashScreens.andReturn([]);
+
+        return result;
+    }
+
+    beforeEach(function () {
+        spyOn(FileUpdater, 'updatePaths');
+    });
+
+    it('should guess target filename based on icon size', function () {
+        var images = [
+            {src: 'res/Windows/Square44x44Logo_100.png', width: '44', height: '44' },
+            {src: 'res/Windows/Square44x44Logo_240.png', width: '106', height: '106' }
+        ];
+
+        var project = { projectConfig: createMockConfig(images), root: PROJECT };
+        var locations = { root: PROJECT };
+
+        copyImages(project, locations);
+
+        var expectedPathMap = {};
+        expectedPathMap['images' + path.sep + 'Square44x44Logo.scale-100.png'] = 'res/Windows/Square44x44Logo_100.png';
+        expectedPathMap['images' + path.sep + 'Square44x44Logo.scale-240.png'] = 'res/Windows/Square44x44Logo_240.png';
+        expect(FileUpdater.updatePaths).toHaveBeenCalledWith(expectedPathMap, { rootDir: PROJECT }, logFileOp);
+    });
+
+    it('should ignore unknown icon sizes and emit a warning', function () {
+        var config = createMockConfig([
+            {src: 'res/Windows/UnknownImage.png', width: '999', height: '999' },
+        ]);
+        var project = { projectConfig: config, root: PROJECT };
+        var locations = { root: PROJECT };
+
+        var warnSpy = jasmine.createSpy('warn');
+        events.on('warn', warnSpy);
+        copyImages(project, locations);
+        expect(FileUpdater.updatePaths).toHaveBeenCalledWith({}, { rootDir: PROJECT }, logFileOp);
+        expect(warnSpy.calls[0].args[0]).toMatch('image was skipped');
+    });
+
+    describe('when "target" attribute is specified for the image', function () {
+        it('should copy all images with the same base name and extension to destination dir', function () {
+            var matchingFiles = [
+                'Square44x44.scale-100.png',
+                'Square44x44.targetsize-16.png',
+                'Square44x44.scale-150_targetsize-16.png',
+                'Square44x44.targetsize-16_scale-200.png',
+                'Square44x44.targetsize-16_altform-unplated_scale-200.png'
+            ];
+
+            var nonMatchingFiles = [
+                'Square55x55.scale-100.png',
+                'Square44x44.targetsize-16.jpg'
+            ];
+
+            spyOn(fs, 'readdirSync').andReturn(matchingFiles.concat(nonMatchingFiles));
+
+            var images = [{src: 'res/Windows/Square44x44.png', target: 'SmallIcon' }];
+            var project = { projectConfig: createMockConfig(images), root: PROJECT };
+            var locations = { root: PROJECT };
+
+            copyImages(project, locations);
+
+            var expectedPathMap = {};
+            expectedPathMap[path.join('images', 'SmallIcon.scale-100.png')] =
+                    path.join('res', 'Windows', 'Square44x44.scale-100.png');
+            expectedPathMap[path.join('images','SmallIcon.targetsize-16.png')] =
+                    path.join('res', 'Windows', 'Square44x44.targetsize-16.png');
+            expectedPathMap[path.join('images', 'SmallIcon.scale-150_targetsize-16.png')] =
+                    path.join('res', 'Windows', 'Square44x44.scale-150_targetsize-16.png');
+            expectedPathMap[path.join('images', 'SmallIcon.targetsize-16_scale-200.png')] =
+                    path.join('res', 'Windows', 'Square44x44.targetsize-16_scale-200.png');
+            expectedPathMap[path.join('images', 'SmallIcon.targetsize-16_altform-unplated_scale-200.png')] =
+                    path.join('res', 'Windows', 'Square44x44.targetsize-16_altform-unplated_scale-200.png');
+            expect(FileUpdater.updatePaths).toHaveBeenCalledWith(expectedPathMap, { rootDir: PROJECT }, logFileOp);
+        });
     });
 });

@@ -30,6 +30,7 @@ var util = require('util');
 var semver = require('semver');
 var shell = require('shelljs');
 var AppxManifest = require('./AppxManifest');
+var PluginHandler = require('./PluginHandler');
 var events = require('cordova-common').events;
 var CordovaError = require('cordova-common').CordovaError;
 var xml_helpers = require('cordova-common').xmlHelpers;
@@ -64,7 +65,7 @@ jsprojManager.getProject = function (directory) {
     var projectFiles = shell.ls(path.join(directory, '*.projitems'));
     if (projectFiles.length === 0) {
         throw (new CordovaError('The directory ' + directory +
-            ' does not appear to be a Unified Windows Store project (no .projitems file)'));
+            ' does not appear to be a Unified Windows Store project (no .projitems file found)'));
     }
     return new jsprojManager(path.normalize(projectFiles[0]));
 };
@@ -183,7 +184,7 @@ jsprojManager.prototype = {
         relative_path = path.normalize(relative_path);
         var inserted_path = relative_path.split('/').join('\\');
 
-        var pluginProjectXML = xml_helpers.parseElementtreeSync(relative_path);
+        var pluginProjectXML = xml_helpers.parseElementtreeSync(path.resolve(this.projectFolder, relative_path));
 
         // find the guid + name of the referenced project
         var projectGuid = pluginProjectXML.find("PropertyGroup/ProjectGuid").text;
@@ -192,7 +193,7 @@ jsprojManager.prototype = {
         // get the project type
         var projectTypeGuid = getProjectTypeGuid(relative_path);
         if (!projectTypeGuid) {
-            throw new CordovaError("unrecognized project type");
+            throw new CordovaError("Unrecognized project type at " + relative_path + " (not .csproj or .vcxproj)");
         }
 
         var preInsertText = "\tProjectSection(ProjectDependencies) = postProject\r\n" +
@@ -224,7 +225,7 @@ jsprojManager.prototype = {
                 });
 
                 if (!jsProjectFound) {
-                    throw new CordovaError("no jsproj found in solution");
+                    throw new CordovaError("No jsproj found in solution");
                 }
             } else {
                 // Insert a project dependency only for projects that match specified target and version
@@ -239,7 +240,7 @@ jsprojManager.prototype = {
             // EndProject in the file should actually be an EndProject (and not an EndProjectSection, for example).
             var pos = solText.lastIndexOf("EndProject");
             if (pos === -1) {
-                throw new Error("no EndProject found in solution");
+                throw new Error("No EndProject found in solution");
             }
             pos += 10; // Move pos to the end of EndProject text
             solText = solText.slice(0, pos) + postInsertText + solText.slice(pos);
@@ -264,14 +265,14 @@ jsprojManager.prototype = {
         var inserted_path = relative_path.split('/').join('\\');
 
         // find the guid + name of the referenced project
-        var pluginProjectXML = xml_helpers.parseElementtreeSync(relative_path);
+        var pluginProjectXML = xml_helpers.parseElementtreeSync(path.resolve(this.projectFolder, relative_path));
         var projectGuid = pluginProjectXML.find("PropertyGroup/ProjectGuid").text;
         var projName = getProjectName(pluginProjectXML, relative_path);
 
         // get the project type
         var projectTypeGuid = getProjectTypeGuid(relative_path);
         if (!projectTypeGuid) {
-            throw new Error("unrecognized project type");
+            throw new Error("Unrecognized project type at " + relative_path + " (not .csproj or .vcxproj)");
         }
 
         var preInsertTextRegExp = getProjectReferencePreInsertRegExp(projectGuid);
@@ -341,6 +342,14 @@ jsprojManager.prototype = {
 
         return projects;
     }
+};
+
+jsprojManager.prototype.getInstaller = function (type) {
+    return PluginHandler.getInstaller(type);
+};
+
+jsprojManager.prototype.getUninstaller = function (type) {
+    return PluginHandler.getUninstaller(type);
 };
 
 function getProjectReferencePreInsertRegExp(projectGuid) {

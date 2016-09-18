@@ -25,6 +25,7 @@ var Win10AppxManifest = AppxManifest.__get__('Win10AppxManifest');
 var refineColor = AppxManifest.__get__('refineColor');
 
 var WINDOWS_MANIFEST = 'template/package.windows.appxmanifest';
+var WINDOWS_10_MANIFEST = 'template/package.windows10.appxmanifest';
 var WINDOWS_PHONE_MANIFEST = 'template/package.phone.appxmanifest';
 var CSS_COLOR_NAME = 'turquoise';
 
@@ -62,6 +63,42 @@ describe('AppxManifest', function () {
 
         it('should add ":" to manifest prefix if needed', function () {
             expect(new AppxManifest(WINDOWS_MANIFEST, 'prefix').prefix).toEqual('prefix:');
+        });
+    });
+
+    describe('purgeCache method', function () {
+        beforeEach(function () {
+            AppxManifest.__set__('manifestCache', { a: 'foo/a', b: 'foo/b', c: 'foo/c' });
+        });
+
+        it('should remove all entries when no parameter is specified', function () {
+            AppxManifest.purgeCache();
+            var cache = AppxManifest.__get__('manifestCache');
+            expect(Object.keys(cache).length).toBe(0);
+        });
+
+        it('should remove an entry when parameter is a string key', function () {
+            AppxManifest.purgeCache('a');
+            var cache = AppxManifest.__get__('manifestCache');
+            expect(Object.keys(cache).length).toBe(2);
+            expect(cache.a).not.toBeDefined();
+        });
+
+        it('should remove multiple entries when parameter is an array of keys', function () {
+            AppxManifest.purgeCache(['a', 'b']);
+            var cache = AppxManifest.__get__('manifestCache');
+            expect(Object.keys(cache).length).toBe(1);
+            expect(cache.a).not.toBeDefined();
+            expect(cache.b).not.toBeDefined();
+        });
+
+        it('should not remove anything if there is no such key', function () {
+            AppxManifest.purgeCache(['bar']);
+            var cache = AppxManifest.__get__('manifestCache');
+            expect(Object.keys(cache).length).toBe(3);
+            expect(cache.a).toBeDefined();
+            expect(cache.b).toBeDefined();
+            expect(cache.c).toBeDefined();
         });
     });
 
@@ -130,6 +167,19 @@ describe('AppxManifest', function () {
                 expect(function () { emptyManifest[method](); }).toThrow();
                 expect(manifest[method]()).toBeDefined();
             });
+        });
+    });
+
+    describe('instance write method', function () {
+        it('should not write duplicate UAP capability declarations', function () {
+            var manifest = AppxManifest.get(WINDOWS_10_MANIFEST);
+            var capabilities = manifest.doc.find('.//Capabilities');
+            capabilities.append(new et.Element('uap:Capability', { 'Name': 'enterpriseAuthentication' }));
+            capabilities.append(new et.Element('uap:Capability', { 'Name': 'enterpriseAuthentication' }));
+            
+            var xml = manifest.writeToString();
+
+            expect((xml.match(/enterpriseAuthentication/g) || []).length).toBe(1);
         });
     });
 

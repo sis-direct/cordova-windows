@@ -22,12 +22,13 @@ var fs    = require('fs');
 var path  = require('path');
 var shell = require('shelljs');
 var uuid  = require('node-uuid');
+var events = require('cordova-common').events;
 var CordovaError = require('cordova-common').CordovaError;
 var AppxManifest = require('../../template/cordova/lib/AppxManifest');
+var pkg = require('../../package');
 
 // Creates cordova-windows project at specified path with specified namespace, app name and GUID
-// module.exports.run = function (argv) {
-module.exports.create = function (destinationDir, config, options, events) {
+module.exports.create = function (destinationDir, config, options) {
     if(!destinationDir) return Q.reject('No destination directory specified.');
 
     var projectPath = path.resolve(destinationDir);
@@ -46,19 +47,23 @@ module.exports.create = function (destinationDir, config, options, events) {
     var root = path.join(__dirname, '..', '..');
 
     events.emit('log', 'Creating Cordova Windows Project:');
-    events.emit('log', '\tApp Name  : ' + appName);
-    events.emit('log', '\tNamespace : ' + packageName);
-    events.emit('log', '\tPath      : ' + projectPath);
+    events.emit('log', '\tPath: ' + path.relative(process.cwd(), projectPath));
+    events.emit('log', '\tNamespace: ' + packageName);
+    events.emit('log', '\tName: ' + appName);
     if (templateOverrides) {
-        events.emit('log', '\tCustomTemplatePath : ' + templateOverrides);
+        events.emit('log', '\tCustomTemplatePath: ' + templateOverrides);
     }
 
     // Copy the template source files to the new destination
-    events.emit('verbose', 'Copying template to ' + projectPath);
+    events.emit('verbose', 'Copying windows template project to ' + projectPath);
     shell.cp('-rf', path.join(root, 'template', '*'), projectPath);
 
     // Duplicate cordova.js to platform_www otherwise it will get removed by prepare
     shell.cp('-rf', path.join(root, 'template/www/cordova.js'), path.join(projectPath, 'platform_www'));
+    // Duplicate splashscreen.css to platform_www otherwise it will get removed by prepare
+    var cssDirectory = path.join(projectPath, 'platform_www', 'css');
+    recursiveCreateDirectory(cssDirectory);
+    shell.cp('-rf', path.join(root, 'template/www/css/splashscreen.css'), cssDirectory);
 
     // Copy cordova-js-src directory
     events.emit('verbose', 'Copying cordova-js sources to platform_www');
@@ -76,7 +81,7 @@ module.exports.create = function (destinationDir, config, options, events) {
     shell.cp('-rf', path.join(root, 'bin', 'lib', 'check_reqs*'), path.join(projectPath, 'cordova', 'lib'));
 
     if (templateOverrides && fs.existsSync(templateOverrides)) {
-        events.emit('verbose', 'Copying template overrides from ' + templateOverrides + ' to ' + projectPath);
+        events.emit('verbose', 'Copying windows template overrides from ' + templateOverrides + ' to ' + projectPath);
         shell.cp('-rf', templateOverrides, projectPath);
     }
 
@@ -89,7 +94,7 @@ module.exports.create = function (destinationDir, config, options, events) {
 
     // replace specific values in manifests' templates
     events.emit('verbose', 'Updating manifest files with project configuration.');
-    [ 'package.windows.appxmanifest', 'package.phone.appxmanifest', 
+    [ 'package.windows.appxmanifest', 'package.phone.appxmanifest',
       'package.windows10.appxmanifest' ]
     .forEach(function (item) {
         var manifest = AppxManifest.get(path.join(projectPath, item));
@@ -107,6 +112,7 @@ module.exports.create = function (destinationDir, config, options, events) {
         shell.rm('-rf', path.join(projectPath, file));
     });
 
+    events.emit('log', 'Windows project created with ' + pkg.name + '@' + pkg.version);
     return Q.resolve();
 };
 

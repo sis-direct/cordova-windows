@@ -24,6 +24,7 @@ var shell = require('shelljs');
 var utils = require('./utils');
 var prepare = require('./prepare');
 var package = require('./package');
+var Version = require('./Version');
 var MSBuildTools = require('./MSBuildTools');
 var AppxManifest = require('./AppxManifest');
 var ConfigParser = require('./ConfigParser');
@@ -49,7 +50,6 @@ var ROOT = path.resolve(__dirname, '../..');
 // See 'help' function for args list
 module.exports.run = function run (buildOptions) {
 
-    var that = this;
     ROOT = this.root || ROOT;
 
     if (!utils.isCordovaProject(this.root)){
@@ -62,19 +62,17 @@ module.exports.run = function run (buildOptions) {
     .then(function(msbuildTools) {
         // Apply build related configs
         prepare.updateBuildConfig(buildConfig);
-        // CB-5421 Add BOM to all html, js, css files
-        // to ensure app can pass Windows Store Certification
-        prepare.addBOMSignature(that.locations.www);
 
         if (buildConfig.publisherId) {
             updateManifestWithPublisher(msbuildTools, buildConfig);
         }
 
         cleanIntermediates();
-        return buildTargets(msbuildTools, buildConfig).then(function(pkg) {
-            events.emit('verbose', ' BUILD OUTPUT: ' + pkg.appx);
-            return pkg;
-        });
+        return buildTargets(msbuildTools, buildConfig);
+    })
+    .then(function(pkg) {
+        events.emit('verbose', ' BUILD OUTPUT: ' + pkg.appx);
+        return pkg;
     });
 };
 
@@ -91,7 +89,7 @@ module.exports.getBuildTargets  = function(isWinSwitch, isPhoneSwitch, projOverr
             case 'uap':
                 return [projFiles.win10];
             default:
-                events.emit('warn', 'Unrecognized --appx parameter passed to build: "' + projOverride + '", ignoring.');
+                events.emit('warn', 'Ignoring unrecognized --appx parameter passed to build: "' + projOverride + '"');
                 break;
         }
     }
@@ -106,7 +104,7 @@ module.exports.getBuildTargets  = function(isWinSwitch, isPhoneSwitch, projOverr
         switch(windowsTargetVersion.toLowerCase()) {
             case '8':
             case '8.0':
-                throw new CordovaError('windows8 platform is deprecated. To use windows-target-version=8.0 you may downgrade to cordova-windows@4.');
+                throw new CordovaError('windows8 platform is deprecated. To use windows-target-version=8.0 you must downgrade to cordova-windows@4.');
             case '8.1':
                 targets.push(projFiles.win);
                 break;
@@ -171,18 +169,18 @@ function parseAndValidateArgs(options) {
 
     // Validate args
     if (options.debug && options.release) {
-        throw new CordovaError('Only one of "debug"/"release" options should be specified');
+        throw new CordovaError('Cannot specify "debug" and "release" options together.');
     }
 
     if (args.phone && args.win) {
-        throw new CordovaError('Only one of "phone"/"win" options should be specified');
+        throw new CordovaError('Cannot specify "phone" and "win" options together.');
     }
 
     // get build options/defaults
     config.buildType = options.release ? 'release' : 'debug';
 
     var archs = options.archs || args.archs;
-    config.buildArchs = archs ? archs.split(' ') : ['anycpu'];
+    config.buildArchs = archs ? archs.toLowerCase().split(' ') : ['anycpu'];
 
     config.phone = args.phone ? true : false;
     config.win = args.win ? true : false;
@@ -222,7 +220,7 @@ function parseBuildConfig(buildConfigPath, buildType) {
     events.emit('verbose', 'Reading build config file: '+ buildConfigPath);
     try {
         var contents = fs.readFileSync(buildConfigPath, 'utf8');
-        buildConfig = JSON.parse(contents);
+        buildConfig = JSON.parse(contents.replace(/^\ufeff/, '')); // Remove BOM
     } catch (e) {
         if (e.code === 'ENOENT') {
             throw new CordovaError('Specified build config file does not exist: ' + buildConfigPath);
@@ -271,7 +269,7 @@ function updateManifestWithPublisher(allMsBuildVersions, config) {
     if (!config.publisherId) return;
 
     var selectedBuildTargets = getBuildTargets(config);
-    var msbuild = getMsBuildForTargets(selectedBuildTargets, config, allMsBuildVersions);
+    var msbuild = getLatestMSBuild(allMsBuildVersions);
     var myBuildTargets = filterSupportedTargets(selectedBuildTargets, msbuild);
     var manifestFiles = myBuildTargets.map(function(proj) {
         return projFilesToManifests[proj];
@@ -286,7 +284,7 @@ function updateManifestWithPublisher(allMsBuildVersions, config) {
 function buildTargets(allMsBuildVersions, config) {
     // filter targets to make sure they are supported on this development machine
     var selectedBuildTargets = getBuildTargets(config);
-    var msbuild = getMsBuildForTargets(selectedBuildTargets, config, allMsBuildVersions);
+    var msbuild = getLatestMSBuild(allMsBuildVersions);
     if (!msbuild) {
         return Q.reject(new CordovaError('No valid MSBuild was detected for the selected target.'));
     }
@@ -404,7 +402,7 @@ function getBuildTargets(buildConfig) {
         switch(windowsTargetVersion) {
             case '8':
             case '8.0':
-                throw new CordovaError('windows8 platform is deprecated. To use windows-target-version=8.0 you may downgrade to cordova-windows@4.');
+                throw new CordovaError('windows8 platform is deprecated. To use windows-target-version=8.0 you must downgrade to cordova-windows@4.');
             case '8.1':
                 targets.push(projFiles.win);
                 break;
@@ -451,7 +449,7 @@ function getBuildTargets(buildConfig) {
                 targets = [projFiles.win10];
                 break;
             default:
-                events.emit('warn', 'Unrecognized --appx parameter passed to build: "' + buildConfig.projVerOverride + '", ignoring.');
+                events.emit('warn', 'Ignoring unrecognized --appx parameter passed to build: "' + buildConfig.projVerOverride + '"');
                 break;
         }
     }
@@ -477,14 +475,27 @@ function getBuildTargets(buildConfig) {
     return targets;
 }
 
-function getMsBuildForTargets(selectedTargets, buildConfig, allMsBuildVersions) {
+function getLatestMSBuild(allMsBuildVersions) {
     var availableVersions = allMsBuildVersions
-    .reduce(function(obj, msbuildVersion) {
-        obj[msbuildVersion.version] = msbuildVersion;
-        return obj;
-    }, {});
+    .filter(function (buildTools) {
+        // Sanitize input - filter out tools w/ invalid versions
+        return Version.tryParse(buildTools.version);
+    })
+    .sort(function (a, b) {
+        // Sort tools list - use parsed Version objects for that
+        // to respect both major and minor versions segments
+        var parsedA = Version.fromString(a.version);
+        var parsedB = Version.fromString(b.version);
 
-    return availableVersions['15.0'] || availableVersions['14.0'] || availableVersions['12.0'];
+        if (parsedA.gt(parsedB)) return -1;
+        if (parsedA.eq(parsedB)) return 0;
+        return 1;
+    });
+
+    if (availableVersions.length > 0) {
+        // After sorting the first item will be the highest version available
+        return availableVersions[0];
+    }
 }
 
 // TODO: Fix this so that it outlines supported versions based on version criteria:
@@ -504,19 +515,24 @@ function msBuild15TargetsFilter(target) {
 
 function filterSupportedTargets (targets, msbuild) {
     if (!targets || targets.length === 0) {
-        events.emit('warn', 'No build targets are specified.');
+        events.emit('warn', 'No build targets specified');
         return [];
     }
 
     var targetFilters = {
         '12.0': msBuild12TargetsFilter,
         '14.0': msBuild14TargetsFilter,
-        '15.0': msBuild15TargetsFilter
+        '15.x': msBuild15TargetsFilter,
+        get: function (version) {
+            // Apart from exact match also try to get filter for version range
+            // so we can find for example targets for version '15.1'
+            return this[version] || this[version.replace(/\.\d+$/, '.x')];
+        }
     };
 
-    var filter = targetFilters[msbuild.version];
+    var filter = targetFilters.get(msbuild.version);
     if (!filter) {
-        events.emit('warn', 'Unsupported msbuild version "' + msbuild.version + '", aborting.');
+        events.emit('warn', 'MSBuild v' + msbuild.version + ' is not supported, aborting.');
         return [];
     }
 
